@@ -20,6 +20,7 @@ When performing any Rust development work, apply the following rules without exc
 
 ### Error Handling (Highest Priority)
 - Every function that can possibly return an error must have its own dedicated, custom error type. This error type is defined locally (e.g., as an enum or struct inside or next to the function or module) and must not be reusable or returned by any other function in the codebase. There are no global error types or shared error hierarchies.
+- Define the error type immediately before the function that returns it. The reader should encounter the error and its variants right before reading the function that produces them.
 - Error paths are as important as happy paths. Explicitly handle and propagate errors using `?` or `match`/`if let` as appropriate. Never ignore errors.
 - `unwrap()` and `expect()` are forbidden in all production code paths. The sole exception occurs when the developer can prove with certainty that the operation cannot fail under any circumstances. In that exceptional case, place a detailed explanatory comment on the immediately preceding line or on the same line, demonstrating the invariants, preconditions, or type-level guarantees that make failure impossible. Example: `// SAFETY: `foo` is validated earlier and the input is known to be ASCII; the UTF-8 conversion documented in the stdlib cannot fail here.`
 - Prefer `Result<T, MySpecificError>` return types. Use `thiserror` or manual `impl std::error::Error` only when truly necessary for a specific function's error; otherwise keep errors simple and local.

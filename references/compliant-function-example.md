@@ -33,6 +33,13 @@ pub struct ProductId(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quantity(u32);
 
+// Error type defined immediately before the only function that returns it.
+#[derive(Debug, thiserror::Error)]
+pub enum QuantityError {
+    #[error("quantity must be at least one, got {received}")]
+    MustBeAtLeastOne { received: u32 },
+}
+
 impl Quantity {
     /// Creates a `Quantity` only when the value is at least one.
     pub fn try_new(value: u32) -> Result<Self, QuantityError> {
@@ -96,14 +103,9 @@ pub struct OrderSummary {
 }
 
 // ---------------------------------------------------------------------------
-// Custom error types. Each fallible function has its own dedicated error type.
+// The compliant function. Pure, self-contained, explicit errors, no unwrap.
+// Its dedicated error type is defined right above it.
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, thiserror::Error)]
-pub enum QuantityError {
-    #[error("quantity must be at least one, got {received}")]
-    MustBeAtLeastOne { received: u32 },
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessCustomerOrderError {
@@ -125,10 +127,6 @@ pub enum ProcessCustomerOrderError {
         available: u32,
     },
 }
-
-// ---------------------------------------------------------------------------
-// The compliant function. Pure, self-contained, explicit errors, no unwrap.
-// ---------------------------------------------------------------------------
 
 /// Builds a validated order summary for an active customer and an in-stock product.
 ///
@@ -192,7 +190,7 @@ pub fn process_customer_order(
 - **Newtypes:** `CustomerId`, `ProductId`, `Quantity`, `UnitPrice`, and `OrderTotal` wrap primitives so the type system prevents mixing unrelated values.
 - **Invariant enforcement in constructors:** `Quantity::try_new` makes it impossible to construct a zero quantity. The validation boundary is pushed to the edge where raw user input first enters the domain model.
 - **Enums:** `CustomerStatus` and `ProductAvailability` make invalid states unrepresentable. A product cannot simultaneously be in stock and out of stock.
-- **Dedicated error types:** `QuantityError` belongs only to `Quantity::try_new`, and `ProcessCustomerOrderError` belongs only to `process_customer_order`. Neither is reused elsewhere.
+- **Dedicated error types placed before their functions:** `QuantityError` appears immediately before `Quantity::try_new`, and `ProcessCustomerOrderError` appears immediately before `process_customer_order`. Neither error type is reused elsewhere.
 - **No `unwrap`/`expect`:** Fallible lookups are handled explicitly with `ok_or` and `?`. Test data uses `unwrap` only on hard-coded literals that are known to parse successfully.
 - **Pure function:** `process_customer_order` takes lookup closures instead of repository references, so it has no I/O, no logging, and no mutation of external state. It is trivial to unit test.
 - **Self-contained:** All business-rule enforcement and price computation live in one cohesive function. The reader can understand the whole operation by reading top to bottom.
