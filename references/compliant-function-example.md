@@ -8,7 +8,7 @@ We need a function that validates and processes a customer order for a specific 
 
 - Ensure the customer exists and is active.
 - Ensure the product exists and is in stock.
-- Validate the requested quantity is at least one and does not exceed stock.
+- Validate the requested quantity does not exceed stock.
 - Compute a total price with a simple bulk discount.
 - Return an order summary without performing any side effects.
 
@@ -21,6 +21,7 @@ use rust_decimal::Decimal;
 
 // ---------------------------------------------------------------------------
 // Domain newtypes. Bare primitives are never used to represent domain ideas.
+// The constructors enforce invariants so invalid states cannot be constructed.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,21 @@ pub struct ProductId(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quantity(u32);
+
+impl Quantity {
+    /// Creates a `Quantity` only when the value is at least one.
+    pub fn try_new(value: u32) -> Result<Self, QuantityError> {
+        if value == 0 {
+            Err(QuantityError::MustBeAtLeastOne { received: value })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitPrice(Decimal);
@@ -80,8 +96,14 @@ pub struct OrderSummary {
 }
 
 // ---------------------------------------------------------------------------
-// Custom error type dedicated to this function. It is not reused elsewhere.
+// Custom error types. Each fallible function has its own dedicated error type.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum QuantityError {
+    #[error("quantity must be at least one, got {received}")]
+    MustBeAtLeastOne { received: u32 },
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessCustomerOrderError {
@@ -102,9 +124,6 @@ pub enum ProcessCustomerOrderError {
         requested: Quantity,
         available: u32,
     },
-
-    #[error("quantity must be at least one, got {0}")]
-    InvalidQuantity(u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -119,17 +138,11 @@ pub enum ProcessCustomerOrderError {
 pub fn process_customer_order(
     customer_id: CustomerId,
     product_id: ProductId,
-    requested_quantity: u32,
+    quantity: Quantity,
     find_customer: impl FnOnce(CustomerId) -> Option<Customer>,
     find_product: impl FnOnce(ProductId) -> Option<Product>,
 ) -> Result<OrderSummary, ProcessCustomerOrderError> {
-    // 1. Validate primitive input and convert it into a domain newtype.
-    if requested_quantity == 0 {
-        return Err(ProcessCustomerOrderError::InvalidQuantity(requested_quantity));
-    }
-    let quantity = Quantity(requested_quantity);
-
-    // 2. Resolve customer and enforce business rule: only active customers may order.
+    // 1. Resolve customer and enforce business rule: only active customers may order.
     let customer = find_customer(customer_id)
         .ok_or(ProcessCustomerOrderError::CustomerNotFound(customer_id))?;
 
@@ -137,7 +150,7 @@ pub fn process_customer_order(
         return Err(ProcessCustomerOrderError::CustomerNotActive(customer_id));
     }
 
-    // 3. Resolve product and enforce stock rules.
+    // 2. Resolve product and enforce stock rules.
     let product = find_product(product_id)
         .ok_or(ProcessCustomerOrderError::ProductNotFound(product_id))?;
 
@@ -148,23 +161,23 @@ pub fn process_customer_order(
         }
     };
 
-    if requested_quantity > available {
+    if quantity.get() > available {
         return Err(ProcessCustomerOrderError::InsufficientStock {
             requested: quantity,
             available,
         });
     }
 
-    // 4. Compute the total with a simple bulk discount. Pure arithmetic, no side effects.
+    // 3. Compute the total with a simple bulk discount. Pure arithmetic, no side effects.
     let UnitPrice(price) = product.unit_price;
-    let discount = if requested_quantity >= 10 {
+    let discount = if quantity.get() >= 10 {
         Decimal::new(95, 2) // 5 % discount
     } else {
         Decimal::ONE
     };
-    let total = OrderTotal(price * Decimal::from(requested_quantity) * discount);
+    let total = OrderTotal(price * Decimal::from(quantity.get()) * discount);
 
-    // 5. Return the validated summary.
+    // 4. Return the validated summary.
     Ok(OrderSummary {
         customer_id,
         product_id,
@@ -177,12 +190,13 @@ pub fn process_customer_order(
 ## Commentary
 
 - **Newtypes:** `CustomerId`, `ProductId`, `Quantity`, `UnitPrice`, and `OrderTotal` wrap primitives so the type system prevents mixing unrelated values.
+- **Invariant enforcement in constructors:** `Quantity::try_new` makes it impossible to construct a zero quantity. The validation boundary is pushed to the edge where raw user input first enters the domain model.
 - **Enums:** `CustomerStatus` and `ProductAvailability` make invalid states unrepresentable. A product cannot simultaneously be in stock and out of stock.
-- **Dedicated error type:** `ProcessCustomerOrderError` is local to this function and describes every possible failure mode precisely. No other function returns it.
-- **No `unwrap`/`expect`:** The only fallible operation, the customer/product lookup, is handled explicitly with `ok_or` and `?`.
+- **Dedicated error types:** `QuantityError` belongs only to `Quantity::try_new`, and `ProcessCustomerOrderError` belongs only to `process_customer_order`. Neither is reused elsewhere.
+- **No `unwrap`/`expect`:** Fallible lookups are handled explicitly with `ok_or` and `?`. Test data uses `unwrap` only on hard-coded literals that are known to parse successfully.
 - **Pure function:** `process_customer_order` takes lookup closures instead of repository references, so it has no I/O, no logging, and no mutation of external state. It is trivial to unit test.
-- **Self-contained:** All validation, business-rule enforcement, and price computation live in one cohesive function. The reader can understand the whole operation by reading top to bottom.
-- **Standard-library-first:** `rust_decimal` is used only because precise decimal arithmetic is genuinely safer than floating point for money. Otherwise the function relies on the standard library.
+- **Self-contained:** All business-rule enforcement and price computation live in one cohesive function. The reader can understand the whole operation by reading top to bottom.
+- **Standard-library-first:** `rust_decimal` is used only because precise decimal arithmetic is genuinely safer than floating point for money. `thiserror` is used only because manually implementing `std::error::Error` would be repetitive and error-prone. Otherwise the code relies on the standard library.
 
 ## Example Unit Test
 
@@ -211,29 +225,59 @@ mod tests {
         let summary = process_customer_order(
             CustomerId(1),
             ProductId(10),
-            3,
+            Quantity::try_new(3).unwrap(),
             |_| Some(customer(1, CustomerStatus::Active)),
             |_| Some(product(10, "12.50", 100)),
         )
         .unwrap();
 
         assert_eq!(summary.customer_id, CustomerId(1));
-        assert_eq!(summary.quantity, Quantity(3));
+        assert_eq!(summary.quantity, Quantity::try_new(3).unwrap());
         assert_eq!(summary.total, OrderTotal(Decimal::new(3750, 2)));
     }
 
     #[test]
-    fn quantity_zero_is_rejected() {
+    fn bulk_discount_is_applied() {
+        let summary = process_customer_order(
+            CustomerId(1),
+            ProductId(10),
+            Quantity::try_new(10).unwrap(),
+            |_| Some(customer(1, CustomerStatus::Active)),
+            |_| Some(product(10, "10.00", 100)),
+        )
+        .unwrap();
+
+        assert_eq!(summary.total, OrderTotal(Decimal::new(9500, 2)));
+    }
+
+    #[test]
+    fn quantity_cannot_be_zero() {
+        let err = Quantity::try_new(0).unwrap_err();
+
+        assert!(matches!(
+            err,
+            QuantityError::MustBeAtLeastOne { received: 0 }
+        ));
+    }
+
+    #[test]
+    fn insufficient_stock_is_rejected() {
         let err = process_customer_order(
             CustomerId(1),
             ProductId(10),
-            0,
+            Quantity::try_new(20).unwrap(),
             |_| Some(customer(1, CustomerStatus::Active)),
-            |_| Some(product(10, "12.50", 100)),
+            |_| Some(product(10, "12.50", 5)),
         )
         .unwrap_err();
 
-        assert!(matches!(err, ProcessCustomerOrderError::InvalidQuantity(0)));
+        assert!(matches!(
+            err,
+            ProcessCustomerOrderError::InsufficientStock {
+                available: 5,
+                ..
+            }
+        ));
     }
 }
 ```
